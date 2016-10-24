@@ -20,7 +20,7 @@ class Canvas():
         # actions = np.array of [center_x, center_y, size]
         center_x = actions[0]
         center_y = actions[1]
-        size = actions[2]
+        size = actions[2] / 3
 
         x_left = max(0, int(center_x*32.0 - size*32.0))
         x_right = min(32, int(center_x*32.0 + size*32.0))
@@ -29,7 +29,8 @@ class Canvas():
 
         self.state[x_left:x_right, y_up:y_down, :] = 1.0;
 
-        reward = -1 * np.sum(np.square(self.goal - self.state))
+        # reward = -1 * np.sum(np.square(self.goal - self.state))
+        reward = center_x + center_y + size
         return self.get_state(), reward
 
     def reset(self):
