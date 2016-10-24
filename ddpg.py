@@ -1,153 +1,218 @@
-import numpy as np
 import tensorflow as tf
-from ops import *
-import os
-from env import *
-from experience_replay import *
-import time
+import numpy as np
 import gym
+
+import tflearn
+
+from ops import *
+from replay_buffer import *
+
+class ActorNetwork():
+    def __init__(self, sess, state_dim, action_dim, action_bound, learning_rate, target_rate):
+        self.sess = sess
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.learning_rate = learning_rate
+        self.target_rate = target_rate
+        self.action_bound = action_bound
+
+        # Real Actor Network
+        self.actor_inputs, self.actor_outputs = self.create_actor("actor_real")
+        self.actor_params = [var for var in tf.trainable_variables() if 'actor_real' in var.name]
+
+        # Target Actor Network
+        self.actor_target_inputs, self.actor_target_outputs = self.create_actor("actor_target")
+        self.actor_target_params = [var for var in tf.trainable_variables() if 'actor_target' in var.name]
+
+        # Update the target actor a little towards the real actor
+        self.update_target_params = [self.actor_target_params[i].assign( \
+            tf.mul(self.actor_params[i], self.target_rate) + tf.mul(self.actor_target_params[i], 1. - self.target_rate) \
+            ) for i in range(len(self.actor_target_params))]
+
+        # action_change = how we want the actions to adjust (given by critic network)
+        self.action_change = tf.placeholder(tf.float32, [None, self.action_dim])
+        # actor_gradients = how we change the params to accomate for action_change
+        self.actor_gradients = tf.gradients(self.actor_outputs, self.actor_params, -self.action_change)
+        self.optimize = tf.train.AdamOptimizer(self.learning_rate).apply_gradients(zip(self.actor_gradients, self.actor_params))
+
+    def create_actor(self, scope):
+        with tf.variable_scope(scope):
+            inputs = tflearn.input_data(shape=[None, self.state_dim])
+            net = tflearn.fully_connected(inputs, 400, activation='relu')
+            net = tflearn.fully_connected(net, 300, activation='relu')
+            # Final layer weights are init to Uniform[-3e-3, 3e-3]
+            w_init = tflearn.initializations.uniform(minval=-0.003, maxval=0.003)
+            out = tflearn.fully_connected(net, self.action_dim, activation='tanh', weights_init=w_init)
+            scaled = tf.mul(out, self.action_bound) # Scale output to -action_bound to action_bound
+        return inputs, scaled
+
+    def train(self, inputs, action_change):
+        self.sess.run(self.optimize, feed_dict={self.actor_inputs: inputs, self.action_change: action_change})
+
+    def predict(self, inputs):
+        return self.sess.run(self.actor_outputs, feed_dict={self.actor_inputs: inputs})
+
+    def predict_target(self, inputs):
+        return self.sess.run(self.actor_target_outputs, feed_dict={self.actor_target_inputs: inputs})
+
+    def update_target_network(self):
+        self.sess.run(self.update_target_params)
+
+
+class CriticNetwork():
+    def __init__(self, sess, state_dim, action_dim, learning_rate, target_rate):
+        self.sess = sess
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.learning_rate = learning_rate
+        self.target_rate = target_rate
+
+        # real critic network
+        self.critic_state_inputs, self.critic_action_inputs, self.critic_out = self.create_critic("critic_real")
+        self.critic_params = [var for var in tf.trainable_variables() if 'critic_real' in var.name]
+
+        # target critic network
+        self.critic_target_state_inputs, self.critic_target_action_inputs, self.critic_target_out = self.create_critic("critic_target")
+        self.critic_target_params = [var for var in tf.trainable_variables() if 'critic_target' in var.name]
+
+        # update the target towards the real
+        self.update_target_params = [self.critic_target_params[i].assign( \
+            tf.mul(self.critic_params[i], self.target_rate) + tf.mul(self.critic_target_params[i], 1. - self.target_rate) \
+            ) for i in range(len(self.critic_target_params))]
+
+        self.new_q_values = tf.placeholder(tf.float32, [None, 1])
+        # self.loss = tf.nn.l2_loss(self.new_q_values - self.critic_out)
+        self.loss = tflearn.mean_square(self.new_q_values, self.critic_out)
+        self.optimize = tf.train.AdamOptimizer(self.learning_rate).minimize(self.loss)
+
+        # Gradient of action_inputs in relation to the critic's predictions
+        # can be seen as: how can the action be changed to get a higher criticc prediction
+        self.action_change = tf.gradients(self.critic_out, self.critic_action_inputs)
+
+    def create_critic(self, scope):
+        with tf.variable_scope(scope):
+            state_inputs = tflearn.input_data(shape=[None, self.state_dim])
+            action_inputs = tflearn.input_data(shape=[None, self.action_dim])
+            net = tflearn.fully_connected(state_inputs, 400, activation='relu')
+
+            # Add the action tensor in the 2nd hidden layer
+            # Use two temp layers to get the corresponding weights and biases
+            t1 = tflearn.fully_connected(net, 300)
+            t2 = tflearn.fully_connected(action_inputs, 300)
+
+            net = tflearn.activation(tf.matmul(net,t1.W) + tf.matmul(action_inputs, t2.W) + t2.b, activation='relu')
+
+            # linear layer connected to 1 output representing Q(s,a)
+            # Weights are init to Uniform[-3e-3, 3e-3]
+            w_init = tflearn.initializations.uniform(minval=-0.003, maxval=0.003)
+            out = tflearn.fully_connected(net, 1, weights_init=w_init)
+        return state_inputs, action_inputs, out
+
+    def train(self, states, actions, new_q_values):
+        return self.sess.run([self.critic_out, self.optimize], feed_dict={self.critic_state_inputs: states, self.critic_action_inputs: actions, self.new_q_values: new_q_values})
+
+    def value(self, states, actions):
+        return self.sess.run(self.critic_out, feed_dict={self.critic_state_inputs: states, self.critic_action_inputs: actions})
+
+    def value_target(self, states, actions):
+        return self.sess.run(self.critic_target_out, feed_dict={self.critic_target_state_inputs: states, self.critic_target_action_inputs: actions})
+
+    def find_action_change(self, states, actions):
+        return self.sess.run(self.action_change, feed_dict={self.critic_state_inputs: states, self.critic_action_inputs: actions})
+
+    def update_target_network(self):
+        self.sess.run(self.update_target_params)
 
 
 class DDPG():
-    def __init__(self, observation_dim, num_actions):
-        self.observation_dim = observation_dim
-        self.num_actions = num_actions
-        self.tau = 0.01 #how much to update target network from actor network
-
-        # actor network
-        self.actor_state = tf.placeholder(tf.float32, [None, self.observation_dim])
-        self.actor_out = self.actor(self.actor_state, "actor_real")
-        self.actor_params = [var for var in tf.trainable_variables() if 'actor_real' in var.name]
-
-        # target actor network
-        self.actor_target_state = tf.placeholder(tf.float32, [None, self.observation_dim])
-        self.actor_target_out = self.actor(self.actor_target_state, "actor_target")
-        self.actor_target_params = [var for var in tf.trainable_variables() if 'actor_target' in var.name]
-
-
-        # critic network
-        self.critic_state = tf.placeholder(tf.float32, [None, self.observation_dim])
-        self.critic_action = tf.placeholder(tf.float32, [None, self.num_actions])
-        self.critic_out = self.critic(self.critic_state, self.critic_action, "critic_real")
-        self.critic_params = [var for var in tf.trainable_variables() if 'critic_real' in var.name]
-
-        # critic target network
-        self.critic_target_state = tf.placeholder(tf.float32, [None, self.observation_dim])
-        self.critic_target_action = tf.placeholder(tf.float32, [None, self.num_actions])
-        self.critic_target_out = self.critic(self.critic_target_state, self.critic_target_action, "critic_target")
-        self.critic_target_params = [var for var in tf.trainable_variables() if 'critic_target' in var.name]
-
-        # how does the Q network change as the action chosen changes?
-        # can be seen as: how should the action chosen increase/decrease for better reward?
-        self.critic_gradient = tf.gradients(self.critic_out, self.critic_action)
-
-        # update actions according to self.action_gradient
-        # self.action_gradient is a measure of which direction we want the action to move
-        # if action_gradient is positiive, we want the action to be a higher value. etc
-        self.action_gradient = tf.placeholder(tf.float32, [None, self.num_actions])
-        self.actor_gradients = tf.gradients(self.actor_out, self.actor_params, -self.action_gradient)
-        grads_zip = zip(self.actor_gradients, self.actor_params)
-        self.optimize_actor = tf.train.AdamOptimizer(0.001).apply_gradients(grads_zip)
-
-        # slowly update the target actor network -> actor network
-        # also target critic network -> critic network
-        self.update_actor_target = [self.actor_target_params[i].assign(tf.mul(self.actor_params[i], self.tau) + tf.mul(self.actor_target_params[i], 1. - self.tau)) for i in range(len(self.actor_params))]
-        self.update_critic_target = [self.critic_target_params[i].assign(tf.mul(self.critic_params[i], self.tau) + tf.mul(self.critic_target_params[i], 1. - self.tau)) for i in range(len(self.critic_params))]
-
-        # update the critic towards new values
-        self.new_critic_values = tf.placeholder(tf.float32, [None, 1])
-        self.critic_loss = tf.nn.l2_loss(self.new_critic_values - self.critic_out)
-        self.optimize_critic = tf.train.AdamOptimizer(0.0001).minimize(self.critic_loss)
-
+    def __init__(self):
         self.sess = tf.Session()
+        self.env = gym.make("Pendulum-v0")
+
+        self.state_dim = self.env.observation_space.shape[0]
+        self.action_dim = self.env.action_space.shape[0]
+        self.action_bound = self.env.action_space.high
+
+        self.actor_learnrate = 0.001
+        self.critic_learnrate = 0.0001
+        self.target_rate = 0.001
+        self.batchsize = 64
+        self.discount = 0.99
+
+        self.actor = ActorNetwork(self.sess, self.state_dim, self.action_dim, self.action_bound, self.actor_learnrate, self.target_rate)
+        self.critic = CriticNetwork(self.sess, self.state_dim, self.action_dim, self.critic_learnrate, self.target_rate)
+
+    def train(self):
         self.sess.run(tf.initialize_all_variables())
 
-    # given s, return an action
-    def actor(self, state, scope):
-        with tf.variable_scope(scope):
-            h1 = tf.nn.relu(dense(state, self.observation_dim, 300, "actor_h1"))
-            h2 = tf.nn.relu(dense(h1, 300, 400, "actor_h2"))
-            w_mean = dense(h2, 400, self.num_actions, "w_mean")
-        return tf.nn.tanh(w_mean)
+        self.actor.update_target_network()
+        self.critic.update_target_network()
 
-    # Q(s,a) = what value?
-    def critic(self, state, actions, scope):
-        with tf.variable_scope(scope):
-            s1 = tf.nn.relu(dense(state, self.observation_dim, 300, "s1"))
-            s2 = tf.nn.relu(dense(s1, 300, 300, "s2"))
-            a1 = tf.nn.relu(dense(actions, self.num_actions, 300, "a1"))
-            combined1 = tf.concat(1,[s2,a1])
-            combined2 = tf.nn.relu(dense(combined1, 600, 300, "combined2"))
-            out = dense(combined2, 300, 1, "out")
-        return out
+        self.replay_buffer = ReplayBuffer(10000, 1234)
 
-    def train(self, env):
-        self.env = env
-        self.buffer = ReplayBuffer(3000)
-
-        # train for 10k episodes
+        # num of eps to train
         for i in xrange(10000):
 
-            current_state = self.env.reset()
-            totalreward = 0
-            avg_maxq = 0
+            state = self.env.reset()
 
-            # 1000 max steps in an episode
-            for s in xrange(200):
-                actions = self.sess.run(self.actor_out, feed_dict={self.actor_state: np.expand_dims(current_state, 0)})[0]
-                actions += np.random.randn(1) / 2.0
+            total_reward = 0
+            max_q = 0
 
-                next_state, reward, done, _ = self.env.step(actions)
-                totalreward += reward
-                self.buffer.add(current_state, actions, reward, done, next_state)
+            # for 200 steps in an episode
+            for j in xrange(199):
+                reshaped_state = np.expand_dims(state, 0)
 
+                # choose action to take, and add noise.
+                action = self.actor.predict(reshaped_state)[0]
+                action += (1.0 / (1.0 + i + j))
 
-                if self.buffer.count > 32:
-                    # Now it's time to learn!
-                    states, actions, rewards, dones, new_states = self.buffer.sample_batch(32)
-                    updated_values = np.zeros(32)
+                next_state, reward, done, info = self.env.step(action)
+                total_reward += reward
 
-                    # What actions would we take from the new states
-                    new_actions = self.sess.run(self.actor_target_out, feed_dict={self.actor_target_state: new_states})
-                    # What is the Q value of the new states (taking acttions from policy)
-                    target_q_values = self.sess.run(self.critic_target_out, feed_dict={self.critic_target_state: new_states, self.critic_target_action: new_actions})
-                    avg_maxq += np.amax(target_q_values)
+                if j == 198:
+                    done = True
 
-                    for k in range(32):
-                        if dones[k]:
-                            updated_values[k] = rewards[k]
+                self.replay_buffer.add(state, action, reward, done, next_state)
+
+                if self.replay_buffer.size() > self.batchsize:
+                    state_batch, action_batch, reward_batch, done_batch, next_state_batch = self.replay_buffer.sample_batch(self.batchsize)
+
+                    # get values of the next states
+                    predicted_next_actions = self.actor.predict_target(next_state_batch)
+                    next_state_values = self.critic.value_target(next_state_batch, predicted_next_actions)
+
+                    # update based on TD: reward + discount*next_value
+                    new_values = []
+                    for k in xrange(self.batchsize):
+                        if done_batch[k]:
+                            new_values.append(reward_batch[k])
                         else:
-                            updated_values[k] = rewards[k] + 0.99*target_q_values[k]
-                    updated_values = np.expand_dims(updated_values, 1)
+                            new_values.append(reward_batch[k] + self.discount * next_state_values[k])
 
-                    # update the critic towards [reward + next state value]
-                    critic_loss, _ = self.sess.run([self.critic_loss, self.optimize_critic], feed_dict={self.critic_state: states, self.critic_action: actions, self.new_critic_values: updated_values})
-                    # print "critic loss: %d" % critic_loss
+                    reshaped_new_values = np.reshape(new_values, (self.batchsize, 1))
+                    predicted_next_values, _ = self.critic.train(state_batch, action_batch, reshaped_new_values)
 
-                    if True:
-                        # update the actor network to increase reward
+                    max_q += np.amax(predicted_next_values)
 
-                        actions_chosen = self.sess.run(self.actor_out, feed_dict={self.actor_state: states})
-                        # action_gradients = how should i change the action i took (increase/decrease) to get more reward?
-                        action_gradients = self.sess.run(self.critic_gradient, feed_dict={self.critic_state: states, self.critic_action: actions_chosen})[0]
-                        # print action_gradients[0]
-                        # optmize = how can i adjust my policy parameters so my action changes as specified in action_gradients
-                        # self.sess.run(self.optimize_actor, feed_dict={self.actor_state: states, self.action_gradient: action_gradients})
+                    predicted_actions = self.actor.predict(state_batch)
+                    action_changes = self.critic.find_action_change(state_batch, predicted_actions)[0]
+                    self.actor.train(state_batch, action_changes)
 
-                    # slowly bring targets up to date
-                    self.sess.run(self.update_actor_target)
-                    self.sess.run(self.update_critic_target)
+                    self.actor.update_target_network()
+                    self.critic.update_target_network()
+
+
+
+
+                state = next_state
 
                 if done:
                     break
 
-            print "[Episode %d] Total reward: %f Max-Q: %f" % (i, totalreward, avg_maxq/200)
+            print "Episode %d: total reward of %d, max_q of %f" % (i, total_reward, max_q / 200)
 
 
 
 
-
-env = gym.make("Pendulum-v0")
-
-ddpg = DDPG(env.observation_space.shape[0], env.action_space.shape[0])
-ddpg.train(env)
+d = DDPG()
+d.train()
