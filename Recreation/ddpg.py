@@ -37,12 +37,6 @@ class ActorNetwork():
 
     def create_actor(self, scope):
         with tf.variable_scope(scope):
-            # inputs = tf.placeholder(tf.float32, [None, self.state_dim])
-            # h1 = tf.nn.relu(dense(inputs, self.state_dim, 400, "actor_h1"))
-            # h2 = tf.nn.relu(dense(h1, 400, 300, "actor_h2"))
-            # h3 = tf.nn.tanh(dense(h2, 300, self.action_dim, "actor_h3"))
-            # scaled = tf.mul(h3, self.action_bound)
-            
             inputs = tflearn.input_data(shape=[None, self.state_dim])
             net = tflearn.fully_connected(inputs, 400, activation='relu')
             net = tflearn.fully_connected(net, 300, activation='relu')
@@ -87,7 +81,8 @@ class CriticNetwork():
             ) for i in range(len(self.critic_target_params))]
 
         self.new_q_values = tf.placeholder(tf.float32, [None, 1])
-        self.loss = tf.nn.l2_loss(self.new_q_values - self.critic_out)
+        # self.loss = tf.nn.l2_loss(self.new_q_values - self.critic_out)
+        self.loss = tflearn.mean_square(self.new_q_values, self.critic_out)
         self.optimize = tf.train.AdamOptimizer(self.learning_rate).minimize(self.loss)
 
         # Gradient of action_inputs in relation to the critic's predictions
@@ -96,15 +91,6 @@ class CriticNetwork():
 
     def create_critic(self, scope):
         with tf.variable_scope(scope):
-            # state_inputs = tf.placeholder(tf.float32, [None, self.state_dim])
-            # action_inputs = tf.placeholder(tf.float32, [None, self.action_dim])
-            #
-            # s1 = tf.nn.relu(dense(state_inputs, self.state_dim, 400, "s1"))
-            # s2 = dense(s1, 400, 300, "s2")
-            # a1 = dense(action_inputs, self.action_dim, 300, "a1")
-            # combined = tf.nn.relu(tf.concat(1, [s2, a1]))
-            # out = dense(combined, 600, 1, "out")
-
             state_inputs = tflearn.input_data(shape=[None, self.state_dim])
             action_inputs = tflearn.input_data(shape=[None, self.action_dim])
             net = tflearn.fully_connected(state_inputs, 400, activation='relu')
@@ -159,10 +145,10 @@ class DDPG():
     def train(self):
         self.sess.run(tf.initialize_all_variables())
 
-        self.replay_buffer = ReplayBuffer(10000, 1234)
-
         self.actor.update_target_network()
         self.critic.update_target_network()
+
+        self.replay_buffer = ReplayBuffer(10000, 1234)
 
         # num of eps to train
         for i in xrange(10000):
@@ -173,7 +159,7 @@ class DDPG():
             max_q = 0
 
             # for 200 steps in an episode
-            for j in xrange(200):
+            for j in xrange(199):
                 reshaped_state = np.expand_dims(state, 0)
 
                 # choose action to take, and add noise.
@@ -183,15 +169,42 @@ class DDPG():
                 next_state, reward, done, info = self.env.step(action)
                 total_reward += reward
 
-                if j == 199:
+                if j == 198:
                     done = True
 
                 self.replay_buffer.add(state, action, reward, done, next_state)
 
-                state = next_state
-
                 if self.replay_buffer.size() > self.batchsize:
-                    max_q += self.learn()
+                    state_batch, action_batch, reward_batch, done_batch, next_state_batch = self.replay_buffer.sample_batch(self.batchsize)
+
+                    # get values of the next states
+                    predicted_next_actions = self.actor.predict_target(next_state_batch)
+                    next_state_values = self.critic.value_target(next_state_batch, predicted_next_actions)
+
+                    # update based on TD: reward + discount*next_value
+                    new_values = []
+                    for k in xrange(self.batchsize):
+                        if done_batch[k]:
+                            new_values.append(reward_batch[k])
+                        else:
+                            new_values.append(reward_batch[k] + self.discount * next_state_values[k])
+
+                    reshaped_new_values = np.reshape(new_values, (self.batchsize, 1))
+                    predicted_next_values, _ = self.critic.train(state_batch, action_batch, reshaped_new_values)
+
+                    max_q += np.amax(predicted_next_values)
+
+                    predicted_actions = self.actor.predict(state_batch)
+                    action_changes = self.critic.find_action_change(state_batch, predicted_actions)[0]
+                    self.actor.train(state_batch, action_changes)
+
+                    self.actor.update_target_network()
+                    self.critic.update_target_network()
+
+
+
+
+                state = next_state
 
                 if done:
                     break
@@ -200,38 +213,6 @@ class DDPG():
 
 
 
-    def learn(self):
-        state_batch, action_batch, reward_batch, done_batch, next_state_batch = self.replay_buffer.sample_batch(self.batchsize)
-
-        # get values of the next states
-        predicted_next_actions = self.actor.predict_target(next_state_batch)
-        next_state_values = self.critic.value_target(next_state_batch, predicted_next_actions)
-
-        # update based on TD: reward + discount*next_value
-        new_values = []
-        for k in xrange(self.batchsize):
-            if reward_batch[k]:
-                new_values.append(reward_batch[k])
-            else:
-                new_values.append(reward_batch[k] + self.discount * next_state_values[k])
-
-        reshaped_new_values = np.reshape(new_values, (self.batchsize, 1))
-        predicted_next_values, _ = self.critic.train(state_batch, action_batch, reshaped_new_values)
-
-        predicted_actions = self.actor.predict(state_batch)
-        action_changes = self.critic.find_action_change(state_batch, predicted_actions)[0]
-        self.actor.train(state_batch, action_changes)
-
-        self.actor.update_target_network()
-        self.actor.update_target_network()
-
-        return np.amax(predicted_next_values)
-
-
-
-
 
 d = DDPG()
-print [v.name for v in d.actor.actor_params]
-print [v.name for v in d.actor.actor_target_params]
 d.train()
