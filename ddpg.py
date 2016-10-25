@@ -6,6 +6,7 @@ import tflearn
 
 from ops import *
 from replay_buffer import *
+from env import *
 
 class ActorNetwork():
     def __init__(self, sess, state_dim, action_dim, action_bound, learning_rate, target_rate):
@@ -127,7 +128,9 @@ class CriticNetwork():
 class DDPG():
     def __init__(self):
         self.sess = tf.Session()
-        self.env = gym.make("Pendulum-v0")
+
+        # self.env = gym.make("Pendulum-v0")
+        self.env = CanvasEnv()
 
         self.state_dim = self.env.observation_space.shape[0]
         self.action_dim = self.env.action_space.shape[0]
@@ -138,6 +141,7 @@ class DDPG():
         self.target_rate = 0.001
         self.batchsize = 64
         self.discount = 0.99
+        self.ep_steps = 10
 
         self.actor = ActorNetwork(self.sess, self.state_dim, self.action_dim, self.action_bound, self.actor_learnrate, self.target_rate)
         self.critic = CriticNetwork(self.sess, self.state_dim, self.action_dim, self.critic_learnrate, self.target_rate)
@@ -159,17 +163,19 @@ class DDPG():
             max_q = 0
 
             # for 200 steps in an episode
-            for j in xrange(199):
+            for j in xrange(self.ep_steps - 1):
                 reshaped_state = np.expand_dims(state, 0)
 
                 # choose action to take, and add noise.
                 action = self.actor.predict(reshaped_state)[0]
-                action += (1.0 / (1.0 + i + j))
+                action += (np.random.rand() - 0.5) * (1 / (1 + i))
 
                 next_state, reward, done, info = self.env.step(action)
                 total_reward += reward
 
-                if j == 198:
+                self.env.save(str(j))
+
+                if j == self.ep_steps - 2:
                     done = True
 
                 self.replay_buffer.add(state, action, reward, done, next_state)
@@ -209,7 +215,7 @@ class DDPG():
                 if done:
                     break
 
-            print "Episode %d: total reward of %d, max_q of %f" % (i, total_reward, max_q / 200)
+            print "Episode %d: total reward of %f, max_q of %f" % (i, total_reward / 9, max_q / 200)
 
 
 
