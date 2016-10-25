@@ -167,8 +167,12 @@ class DDPG():
                 reshaped_state = np.expand_dims(state, 0)
 
                 # choose action to take, and add noise.
-                action = self.actor.predict(reshaped_state)[0]
-                action += (np.random.rand() - 0.5) * (1 / (1 + i))
+                real_action = self.actor.predict(reshaped_state)[0]
+                noise = 2 / (1 + i/300.0)
+                action = real_action + (np.random.rand() - 0.5) * noise
+
+                print "(%f %f) [%f] %f %f" % (real_action[0], real_action[1], noise, action[0], action[1])
+
 
                 next_state, reward, done, info = self.env.step(action)
                 total_reward += reward
